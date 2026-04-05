@@ -15,7 +15,10 @@ jobs:
         with:
           gradle-version: '7.6'
       - name: Build APK
-        run: bash ./gradlew assembleDebug --stacktrace
+        run: |
+          gradle wrapper
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
