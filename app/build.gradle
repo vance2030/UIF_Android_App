@@ -1,5 +1,8 @@
-plugins { id 'com.android.application' }
+plugins {
+    id 'com.android.application'
+}
 android {
+    namespace 'com.mastery.uif'
     compileSdk 33
     defaultConfig {
         applicationId "com.mastery.uif"
@@ -7,7 +10,15 @@ android {
         targetSdk 33
         versionCode 1
         versionName "1.0"
-        externalNativeBuild { cmake { cppFlags "-O3 -ffast-math" } }
+        externalNativeBuild {
+            cmake {
+                cppFlags "-O3 -ffast-math"
+            }
+        }
     }
-    externalNativeBuild { cmake { path "src/main/cpp/CMakeLists.txt" } }
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+        }
+    }
 }
