@@ -1,7 +1,7 @@
 package com.mastery.uif;
 import android.Manifest; import android.app.Activity; import android.content.pm.PackageManager;
 import android.graphics.Bitmap; import android.graphics.Color; import android.graphics.SurfaceTexture;
-import android.hardware.Camera; import android.os.Bundle; import android.view.Gravity;
+import android.hardware.Camera; import android.os.Bundle;
 import android.view.TextureView; import android.widget.Button; import android.widget.ImageView;
 import android.widget.LinearLayout; import android.widget.TextView; import android.widget.FrameLayout;
 import org.tensorflow.lite.Interpreter;
@@ -11,26 +11,25 @@ import java.nio.ByteBuffer; import java.nio.ByteOrder;
 public class MainActivity extends Activity implements TextureView.SurfaceTextureListener {
     private Camera camera; private TextureView textureView; private ImageView overlayView;
     private TextView statsText; private UIFEngine uifEngine; private Interpreter tfliteEngine;
-    private boolean useUIF = true; // Default to Master Y's Engine
+    private boolean useUIF = true;
     private long lastTime = 0; private int frames = 0; private float totalLatency = 0;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         uifEngine = new UIFEngine();
-        
-        // Load TFLite Engine
         try {
             File tfliteModel = new File(copyAsset("mobilenet.tflite"));
-            tfliteEngine = new Interpreter(tfliteModel);
+            Interpreter.Options options = new Interpreter.Options();
+            options.setNumThreads(4); // Give TFLite 4 threads to be fair
+            tfliteEngine = new Interpreter(tfliteModel, options);
         } catch (Exception e) { e.printStackTrace(); }
 
-        // UI တည်ဆောက်ခြင်း (Arena)
         FrameLayout mainLayout = new FrameLayout(this);
         textureView = new TextureView(this); textureView.setSurfaceTextureListener(this);
         overlayView = new ImageView(this); overlayView.setScaleType(ImageView.ScaleType.FIT_XY);
         
         LinearLayout topPanel = new LinearLayout(this); topPanel.setOrientation(LinearLayout.VERTICAL);
-        topPanel.setBackgroundColor(Color.parseColor("#88000000"));
+        topPanel.setBackgroundColor(Color.parseColor("#BB000000"));
         
         statsText = new TextView(this); statsText.setTextColor(Color.WHITE); statsText.setTextSize(18f);
         statsText.setPadding(20, 20, 20, 20);
@@ -75,6 +74,7 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
     private void startArena() {
         new Thread(() -> {
             Bitmap outBmp = Bitmap.createBitmap(224, 224, Bitmap.Config.ARGB_8888);
+            int[] intValues = new int[224 * 224];
             ByteBuffer tfliteInput = ByteBuffer.allocateDirect(1 * 224 * 224 * 3 * 4); tfliteInput.order(ByteOrder.nativeOrder());
             ByteBuffer tfliteOutput = ByteBuffer.allocateDirect(1 * 1001 * 4); tfliteOutput.order(ByteOrder.nativeOrder());
 
@@ -84,11 +84,20 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
                     long start = System.nanoTime();
                     
                     if(useUIF) {
-                        // [MASTER Y'S C++ ENGINE]
+                        // [MASTER Y'S C++ ENGINE] - ZERO COPY MAGIC
                         uifEngine.processFrame(inBmp, outBmp);
                     } else {
-                        // [GOOGLE'S TFLITE ENGINE]
+                        // [GOOGLE'S TFLITE ENGINE] - FORCING IT TO DO ACTUAL WORK
+                        inBmp.getPixels(intValues, 0, 224, 0, 0, 224, 224);
+                        tfliteInput.rewind();
+                        for (int i = 0; i < 224 * 224; ++i) {
+                            int val = intValues[i];
+                            tfliteInput.putFloat(((val >> 16) & 0xFF) / 255.0f);
+                            tfliteInput.putFloat(((val >> 8) & 0xFF) / 255.0f);
+                            tfliteInput.putFloat((val & 0xFF) / 255.0f);
+                        }
                         if(tfliteEngine != null) tfliteEngine.run(tfliteInput, tfliteOutput);
+                        outBmp.eraseColor(Color.RED); // Visually indicate TFLite is running
                     }
                     
                     long end = System.nanoTime();
