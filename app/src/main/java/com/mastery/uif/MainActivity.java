@@ -1,87 +1,110 @@
 package com.mastery.uif;
-import android.Manifest;
-import android.app.Activity;
-import android.content.pm.PackageManager;
-import android.graphics.Bitmap;
-import android.graphics.SurfaceTexture;
-import android.hardware.Camera;
-import android.os.Bundle;
-import android.view.TextureView;
-import android.widget.ImageView;
-import android.widget.TextView;
-import android.widget.FrameLayout;
+import android.Manifest; import android.app.Activity; import android.content.pm.PackageManager;
+import android.graphics.Bitmap; import android.graphics.Color; import android.graphics.SurfaceTexture;
+import android.hardware.Camera; import android.os.Bundle; import android.view.Gravity;
+import android.view.TextureView; import android.widget.Button; import android.widget.ImageView;
+import android.widget.LinearLayout; import android.widget.TextView; import android.widget.FrameLayout;
+import org.tensorflow.lite.Interpreter;
+import java.io.File; import java.io.FileOutputStream; import java.io.InputStream;
+import java.nio.ByteBuffer; import java.nio.ByteOrder;
 
 public class MainActivity extends Activity implements TextureView.SurfaceTextureListener {
-    private Camera camera;
-    private TextureView textureView;
-    private ImageView overlayView;
-    private TextView fpsText;
-    private UIFEngine engine;
-    private long lastTime = 0;
-    private int frames = 0;
+    private Camera camera; private TextureView textureView; private ImageView overlayView;
+    private TextView statsText; private UIFEngine uifEngine; private Interpreter tfliteEngine;
+    private boolean useUIF = true; // Default to Master Y's Engine
+    private long lastTime = 0; private int frames = 0; private float totalLatency = 0;
 
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
+    @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        engine = new UIFEngine();
+        uifEngine = new UIFEngine();
         
-        // ဖန်သားပြင်ကို Code ဖြင့် တိုက်ရိုက်တည်ဆောက်ခြင်း (XML မလိုပါ)
-        FrameLayout layout = new FrameLayout(this);
-        textureView = new TextureView(this);
-        textureView.setSurfaceTextureListener(this);
-        overlayView = new ImageView(this);
-        overlayView.setScaleType(ImageView.ScaleType.FIT_XY);
-        
-        fpsText = new TextView(this);
-        fpsText.setTextColor(0xFF00FF00); // အစိမ်းရောင်
-        fpsText.setTextSize(20f);
-        fpsText.setPadding(30, 50, 0, 0);
-
-        layout.addView(textureView);
-        layout.addView(overlayView);
-        layout.addView(fpsText);
-        setContentView(layout);
-
-        // ကင်မရာ အသုံးပြုခွင့် တောင်းခံခြင်း
-        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.CAMERA}, 1);
-        }
-    }
-
-    @Override
-    public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
+        // Load TFLite Engine
         try {
-            camera = Camera.open();
-            camera.setPreviewTexture(surface);
-            camera.startPreview();
-            startAIThread(); // C++ Engine ကို စတင်လည်ပတ်ခြင်း
-        } catch (Exception e) {}
+            File tfliteModel = new File(copyAsset("mobilenet.tflite"));
+            tfliteEngine = new Interpreter(tfliteModel);
+        } catch (Exception e) { e.printStackTrace(); }
+
+        // UI တည်ဆောက်ခြင်း (Arena)
+        FrameLayout mainLayout = new FrameLayout(this);
+        textureView = new TextureView(this); textureView.setSurfaceTextureListener(this);
+        overlayView = new ImageView(this); overlayView.setScaleType(ImageView.ScaleType.FIT_XY);
+        
+        LinearLayout topPanel = new LinearLayout(this); topPanel.setOrientation(LinearLayout.VERTICAL);
+        topPanel.setBackgroundColor(Color.parseColor("#88000000"));
+        
+        statsText = new TextView(this); statsText.setTextColor(Color.WHITE); statsText.setTextSize(18f);
+        statsText.setPadding(20, 20, 20, 20);
+        
+        LinearLayout btnPanel = new LinearLayout(this); btnPanel.setOrientation(LinearLayout.HORIZONTAL);
+        Button btnTFLite = new Button(this); btnTFLite.setText("RUN TFLITE (Google)");
+        Button btnUIF = new Button(this); btnUIF.setText("RUN UIF (Master Y)");
+        
+        btnTFLite.setOnClickListener(v -> { useUIF = false; resetStats(); });
+        btnUIF.setOnClickListener(v -> { useUIF = true; resetStats(); });
+        
+        btnPanel.addView(btnTFLite); btnPanel.addView(btnUIF);
+        topPanel.addView(btnPanel); topPanel.addView(statsText);
+        
+        mainLayout.addView(textureView); mainLayout.addView(overlayView); mainLayout.addView(topPanel);
+        setContentView(mainLayout);
+
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[]{Manifest.permission.CAMERA}, 1);
     }
-    @Override public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int width, int height) {}
-    @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
-        if(camera != null) { camera.stopPreview(); camera.release(); }
-        return true;
+
+    private void resetStats() { frames = 0; totalLatency = 0; }
+
+    private String copyAsset(String filename) {
+        File f = new File(getCacheDir(), filename);
+        if (!f.exists()) {
+            try (InputStream is = getAssets().open(filename); FileOutputStream fos = new FileOutputStream(f)) {
+                byte[] buffer = new byte[1024]; int read;
+                while ((read = is.read(buffer)) != -1) fos.write(buffer, 0, read);
+            } catch (Exception e) {}
+        }
+        return f.getAbsolutePath();
     }
+
+    @Override public void onSurfaceTextureAvailable(SurfaceTexture surface, int w, int h) {
+        try { camera = Camera.open(); camera.setPreviewTexture(surface); camera.startPreview(); startArena(); } catch (Exception e) {}
+    }
+    @Override public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int w, int h) {}
+    @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) { if(camera != null) { camera.stopPreview(); camera.release(); } return true; }
     @Override public void onSurfaceTextureUpdated(SurfaceTexture surface) {}
 
-    private void startAIThread() {
+    private void startArena() {
         new Thread(() -> {
-            // Resolution ကို 320x240 ထား၍ Real-time Math ကို သက်သေပြမည်
-            Bitmap outBmp = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
+            Bitmap outBmp = Bitmap.createBitmap(224, 224, Bitmap.Config.ARGB_8888);
+            ByteBuffer tfliteInput = ByteBuffer.allocateDirect(1 * 224 * 224 * 3 * 4); tfliteInput.order(ByteOrder.nativeOrder());
+            ByteBuffer tfliteOutput = ByteBuffer.allocateDirect(1 * 1001 * 4); tfliteOutput.order(ByteOrder.nativeOrder());
+
             while(camera != null) {
-                Bitmap inBmp = textureView.getBitmap(320, 240);
+                Bitmap inBmp = textureView.getBitmap(224, 224);
                 if(inBmp != null) {
-                    // MASTER Y ၏ C++ ENGINE က ဓာတ်ပုံကို တွက်ချက်ခြင်း
-                    engine.processFrame(inBmp, outBmp);
-                    frames++;
-                    long now = System.currentTimeMillis();
-                    if(now - lastTime >= 1000) {
-                        final int currentFps = frames;
-                        runOnUiThread(() -> fpsText.setText("[UIF ENGINE ONLINE]\nC++ Math FPS: " + currentFps));
-                        frames = 0; lastTime = now;
+                    long start = System.nanoTime();
+                    
+                    if(useUIF) {
+                        // [MASTER Y'S C++ ENGINE]
+                        uifEngine.processFrame(inBmp, outBmp);
+                    } else {
+                        // [GOOGLE'S TFLITE ENGINE]
+                        if(tfliteEngine != null) tfliteEngine.run(tfliteInput, tfliteOutput);
                     }
-                    // တွက်ပြီးသား ပုံကို ဖုန်း Screen ပေါ်သို့ ပြန်ဆွဲတင်ခြင်း
-                    runOnUiThread(() -> overlayView.setImageBitmap(outBmp));
+                    
+                    long end = System.nanoTime();
+                    float latencyMs = (end - start) / 1000000.0f;
+                    totalLatency += latencyMs; frames++;
+                    long now = System.currentTimeMillis();
+                    
+                    if(now - lastTime >= 1000) {
+                        float avgLatency = totalLatency / frames;
+                        String activeEngine = useUIF ? "[ UIF ENGINE (1-Bit) ]" : "[ TFLITE (Float-32) ]";
+                        int textColor = useUIF ? Color.GREEN : Color.RED;
+                        String status = activeEngine + "\nLatency: " + String.format("%.2f", avgLatency) + " ms\nFPS: " + frames;
+                        
+                        runOnUiThread(() -> { statsText.setTextColor(textColor); statsText.setText(status); overlayView.setImageBitmap(outBmp); });
+                        frames = 0; totalLatency = 0; lastTime = now;
+                    }
                 }
             }
         }).start();
