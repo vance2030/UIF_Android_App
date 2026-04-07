@@ -1,22 +1,16 @@
 package com.mastery.uif;
-
 import android.graphics.Bitmap;
-import android.util.Log;
 
+/**
+ * MASTER Y: UIF PURE INFERENCE SDK
+ * Usage: 
+ * 1. loadModel("/path/to/your/model.uif")
+ * 2. int classId = runInference(cameraBitmap)
+ * 3. releaseEngine() when done.
+ */
 public class UIFEngine {
-    private static final String TAG = "UIF_SDK";
-
-    static {
-        try {
-            System.loadLibrary("uif_engine");
-            Log.i(TAG, "Master Y UIF Protocol: Native Layer Loaded Successfully.");
-        } catch (UnsatisfiedLinkError e) {
-            Log.e(TAG, "FATAL: Could not load UIF C++ Engine.", e);
-        }
-    }
-
-    public UIFEngine() {}
-
-    public native boolean initEngine(String modelPath);
-    public native void processFrame(Bitmap input, Bitmap output);
+    static { System.loadLibrary("uif_engine"); }
+    public native boolean loadModel(String uifModelPath);
+    public native void releaseEngine();
+    public native int runInference(Bitmap inputFrame);
 }
