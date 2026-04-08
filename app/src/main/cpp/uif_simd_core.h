@@ -17,7 +17,7 @@ namespace uif_engine {
         int total_popcount = 0;
         size_t i = 0;
 
-#if UIF_USE_NEON
+#ifdef UIF_USE_NEON
         uint32x4_t v_acc = vdupq_n_u32(0); 
         for (; i + 15 < num_bytes; i += 16) {
             uint8x16_t v_img = vld1q_u8(image_bits + i);
