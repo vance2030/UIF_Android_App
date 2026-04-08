@@ -22,20 +22,31 @@ namespace uif_engine {
         for (; i + 15 < num_bytes; i += 16) {
             uint8x16_t v_img = vld1q_u8(image_bits + i);
             uint8x16_t v_wt  = vld1q_u8(weight_bits + i);
+            
+            // XNOR Operation
             uint8x16_t v_xnor = vmvnq_u8(veorq_u8(v_img, v_wt));
+            
+            // Hardware Popcount (128-bit)
             uint8x16_t v_cnt = vcntq_u8(v_xnor);
-            uint16x8_t v_sum1 = vpaddlq_u8(v_cnt, v_cnt);
-            uint32x4_t v_sum2 = vpaddlq_u16(v_sum1, v_sum1);
+            
+            // [THE FIX]: Pairwise Add takes only ONE argument in ARM NEON
+            uint16x8_t v_sum1 = vpaddlq_u8(v_cnt);
+            uint32x4_t v_sum2 = vpaddlq_u16(v_sum1);
+            
+            // Accumulate
             v_acc = vaddq_u32(v_acc, v_sum2);
         }
+        
         total_popcount += vgetq_lane_u32(v_acc, 0) + vgetq_lane_u32(v_acc, 1) + 
                           vgetq_lane_u32(v_acc, 2) + vgetq_lane_u32(v_acc, 3);
 #endif
 
+        // Fallback for remaining bytes
         for (; i < num_bytes; ++i) {
             uint8_t xnor_val = ~(image_bits[i] ^ weight_bits[i]);
             total_popcount += __builtin_popcount(xnor_val);
         }
+
         return total_popcount;
     }
 }

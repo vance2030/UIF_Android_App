@@ -7,8 +7,7 @@
 #include <unistd.h>
 #include <cstring>
 #include <cstdlib>
-#include <iostream>
-
+#include <vector>
 #include "uif_simd_core.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "UIF_SDK", __VA_ARGS__)
@@ -36,7 +35,7 @@ private:
 public:
     UIF_UniversalEngine(const char* model_path) {
         int fd = open(model_path, O_RDONLY);
-        if (fd == -1) { LOGE("Cannot load .uif model. File missing: %s", model_path); return; }
+        if (fd == -1) { LOGE("Cannot load .uif model."); return; }
         
         struct stat sb; fstat(fd, &sb); file_size = sb.st_size;
         mmap_data = (uint8_t*)mmap(NULL, file_size, PROT_READ, MAP_SHARED, fd, 0);
@@ -45,41 +44,54 @@ public:
         header = reinterpret_cast<ModelHeader*>(mmap_data);
         nodes = reinterpret_cast<NodeMeta*>(mmap_data + sizeof(ModelHeader));
         
-        if (posix_memalign((void**)&memory_arena, 64, header->memory_arena) != 0) {
-            LOGE("Memory Arena Allocation Failed."); return;
-        }
+        if (posix_memalign((void**)&memory_arena, 64, header->memory_arena) != 0) return;
         memset(memory_arena, 0, header->memory_arena);
         is_loaded = true;
-        LOGI("UIF SYSTEM: Universal Engine Loaded via mmap. Nodes: %d, Arena: %d bytes", header->num_nodes, header->memory_arena);
     }
 
-    int ExecuteInference(const uint8_t* input_image) {
+    int ExecuteInference(const uint8_t* input_image_argb, int width, int height) {
         if(!is_loaded) return -1;
-        int mock_prediction = 0; // Baseline return for JNI
+        
+        // 1. [THE GAME CHANGER]: LIVE CAMERA BIT-PACKING (RGB -> 1-Bit Packed)
+        int num_pixels = width * height;
+        int packed_size = (num_pixels + 7) / 8; // Compress 8 pixels into 1 byte
+        std::vector<uint8_t> packed_input(packed_size, 0);
+        
+        for(int i = 0; i < num_pixels; ++i) {
+            // Extract RGB from ARGB_8888
+            int r = input_image_argb[i * 4];
+            int g = input_image_argb[i * 4 + 1];
+            int b = input_image_argb[i * 4 + 2];
+            int gray = (r + g + b) / 3; // Grayscale
+            
+            // Binarize & Pack: If bright enough (>127), set the bit to 1
+            if (gray > 127) {
+                packed_input[i / 8] |= (1 << (7 - (i % 8)));
+            }
+        }
 
+        int mock_prediction = 0;
+
+        // 2. RUN BARE-METAL SIMD NEON XNOR ON LIVE PACKED DATA
         for (uint32_t i = 0; i < header->num_nodes; ++i) {
             NodeMeta& node = nodes[i];
             if (node.type == CONV2D_XNOR_SCALE) {
-                const uint8_t* layer_input = (i == 1) ? input_image : (memory_arena + nodes[node.in1].out_mem_offset);
                 const uint8_t* layer_weights = mmap_data + node.w_offset;
-                
                 size_t num_bytes = (node.in_c * node.k * node.k) / 8; 
                 
-                // [THE GAME CHANGER]: CALLING BARE-METAL SIMD
-                int popcount_result = uif_engine::Hardware_XNOR_Popcount(layer_input, layer_weights, num_bytes);
+                // Call SIMD directly with the live camera packed bits
+                int popcount_result = uif_engine::Hardware_XNOR_Popcount(packed_input.data(), layer_weights, num_bytes);
                 
                 int total_bits = num_bytes * 8;
-                int dot_product = (popcount_result * 2) - total_bits;
-                mock_prediction = dot_product; // Simplified for SDK pipeline proof
+                mock_prediction = (popcount_result * 2) - total_bits; 
             }
         }
-        return mock_prediction > 0 ? 1 : 0;
+        return mock_prediction;
     }
 
     ~UIF_UniversalEngine() {
         if(memory_arena) free(memory_arena);
         if(mmap_data) munmap(mmap_data, file_size);
-        LOGI("UIF SYSTEM: Engine Memory (mmap & arena) Completely Freed.");
     }
 };
 
@@ -104,7 +116,8 @@ extern "C" {
         AndroidBitmap_getInfo(env, bitmapIn, &infoIn);
         AndroidBitmap_lockPixels(env, bitmapIn, &pixelsIn);
         
-        int prediction = engine->ExecuteInference((uint8_t*)pixelsIn);
+        // Pass the live ARGB pixels and dimensions to C++ Engine
+        int prediction = engine->ExecuteInference((uint8_t*)pixelsIn, infoIn.width, infoIn.height);
         
         AndroidBitmap_unlockPixels(env, bitmapIn);
         return prediction;

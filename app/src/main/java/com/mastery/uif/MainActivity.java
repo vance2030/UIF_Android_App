@@ -24,9 +24,9 @@ public class MainActivity extends Activity implements TextureView.SurfaceTexture
             
         engine = new UIFEngine();
         try {
-            File f = new File(getCacheDir(), "dummy.uif");
+            File f = new File(getCacheDir(), "real_model.uif");
             if (!f.exists()) {
-                InputStream is = getAssets().open("dummy.uif");
+                InputStream is = getAssets().open("real_model.uif");
                 FileOutputStream fos = new FileOutputStream(f);
                 byte[] buffer = new byte[1024]; int read;
                 while ((read = is.read(buffer)) != -1) fos.write(buffer, 0, read);
