@@ -1,102 +1,110 @@
 #include <jni.h>
 #include <android/bitmap.h>
 #include <android/log.h>
-#include <vector>
-#include <string>
-#include <fstream>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <cstring>
+#include <cstdlib>
+#include <iostream>
+
+#include "uif_simd_core.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "UIF_SDK", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "UIF_SDK", __VA_ARGS__)
 
-class UIF_Pure_Inference_Engine {
+#pragma pack(push, 1)
+struct ModelHeader { char magic[4]; uint32_t version; uint32_t num_nodes; uint32_t memory_arena; };
+struct NodeMeta { 
+    uint32_t type; uint32_t id, in1, in2, in_c, in_h, in_w, out_c, out_h, out_w, k, s, p; 
+    uint64_t w_offset, t_offset, s_offset, out_mem_offset; 
+};
+#pragma pack(pop)
+
+#define CONV2D_XNOR_SCALE 1
+
+class UIF_UniversalEngine {
 private:
-    bool is_ready = false;
-    int input_dim = 0;
-    int hidden_dim = 0;
-    int num_classes = 0;
-    
-    // Dynamic Memory for ANY Model
-    std::vector<uint64_t> binary_weights; 
+    uint8_t* mmap_data = nullptr;
+    size_t file_size = 0;
+    ModelHeader* header = nullptr;
+    NodeMeta* nodes = nullptr;
+    uint8_t* memory_arena = nullptr;
+    bool is_loaded = false;
 
 public:
-    UIF_Pure_Inference_Engine() {}
+    UIF_UniversalEngine(const char* model_path) {
+        int fd = open(model_path, O_RDONLY);
+        if (fd == -1) { LOGE("Cannot load .uif model. File missing: %s", model_path); return; }
+        
+        struct stat sb; fstat(fd, &sb); file_size = sb.st_size;
+        mmap_data = (uint8_t*)mmap(NULL, file_size, PROT_READ, MAP_SHARED, fd, 0);
+        close(fd);
 
-    // [1. THE LOADER: Read ANY .uif File dynamically]
-    bool loadModel(const std::string& modelPath) {
-        LOGI("Initiating Zero-Copy Load for Model: %s", modelPath.c_str());
+        header = reinterpret_cast<ModelHeader*>(mmap_data);
+        nodes = reinterpret_cast<NodeMeta*>(mmap_data + sizeof(ModelHeader));
         
-        // သီအိုရီအရ: std::ifstream ဖြင့် ဖိုင်ကို ဖွင့်ပြီး Header ကို ဖတ်မည်။
-        // (Mocking the dynamic parsing for demonstration)
-        input_dim = 224 * 224;  // Read from .uif
-        hidden_dim = 1024;      // Read from .uif
-        num_classes = 1000;     // Read from .uif (e.g., MobileNet 1000 classes)
-        
-        // Allocate exact memory needed based on the model (Dynamic Class Support)
-        int required_uint64 = (hidden_dim * input_dim) / 64;
-        binary_weights.resize(required_uint64, 0xFFFFFFFFFFFFFFFF); // Mock loaded weights
-        
-        is_ready = true;
-        LOGI("Model Loaded. Architecture: %dx%d. Classes: %d.", input_dim, hidden_dim, num_classes);
-        return true;
+        if (posix_memalign((void**)&memory_arena, 64, header->memory_arena) != 0) {
+            LOGE("Memory Arena Allocation Failed."); return;
+        }
+        memset(memory_arena, 0, header->memory_arena);
+        is_loaded = true;
+        LOGI("UIF SYSTEM: Universal Engine Loaded via mmap. Nodes: %d, Arena: %d bytes", header->num_nodes, header->memory_arena);
     }
 
-    // [2. THE EXECUTOR: ARM NEON Accelerated XNOR Math]
-    int runInference(uint32_t* pixels) {
-        if (!is_ready) return -1;
-        
-        // ဤနေရာသည် Engine ၏ နှလုံးသားဖြစ်သည်။ 
-        // __builtin_popcountll သည် ARM64 တွင် NEON SIMD ညွှန်ကြားချက်အဖြစ် 
-        // အလိုအလျောက် Compile ဖြစ်သွားပြီး အမြင့်ဆုံး အမြန်နှုန်းကို ပေးစွမ်းသည်။
-        
-        int best_class = 0;
-        int max_score = -9999;
-        
-        // Example Inference Loop (Optimized for 64-bit hardware architecture)
-        // (In a real scenario, this loops over the actual layers parsed from .uif)
-        for(int c = 0; c < num_classes; c++) {
-            int current_score = 0;
-            // Process 64 pixels at a single clock cycle using Bitwise XNOR
-            for(int i = 0; i < 16; i++) { 
-                uint64_t image_chunk = pixels[i]; // Mock 64-bit chunk from image
-                uint64_t weight_chunk = binary_weights[(c * 16) + i];
+    int ExecuteInference(const uint8_t* input_image) {
+        if(!is_loaded) return -1;
+        int mock_prediction = 0; // Baseline return for JNI
+
+        for (uint32_t i = 0; i < header->num_nodes; ++i) {
+            NodeMeta& node = nodes[i];
+            if (node.type == CONV2D_XNOR_SCALE) {
+                const uint8_t* layer_input = (i == 1) ? input_image : (memory_arena + nodes[node.in1].out_mem_offset);
+                const uint8_t* layer_weights = mmap_data + node.w_offset;
                 
-                // THE XNOR + POPCOUNT (Hardware Limit Reached)
-                current_score += __builtin_popcountll(~(image_chunk ^ weight_chunk));
+                size_t num_bytes = (node.in_c * node.k * node.k) / 8; 
+                
+                // [THE GAME CHANGER]: CALLING BARE-METAL SIMD
+                int popcount_result = uif_engine::Hardware_XNOR_Popcount(layer_input, layer_weights, num_bytes);
+                
+                int total_bits = num_bytes * 8;
+                int dot_product = (popcount_result * 2) - total_bits;
+                mock_prediction = dot_product; // Simplified for SDK pipeline proof
             }
-            if(current_score > max_score) { max_score = current_score; best_class = c; }
         }
-        
-        return best_class; // Return the predicted ID
+        return mock_prediction > 0 ? 1 : 0;
+    }
+
+    ~UIF_UniversalEngine() {
+        if(memory_arena) free(memory_arena);
+        if(mmap_data) munmap(mmap_data, file_size);
+        LOGI("UIF SYSTEM: Engine Memory (mmap & arena) Completely Freed.");
     }
 };
 
-UIF_Pure_Inference_Engine* engine = nullptr;
+UIF_UniversalEngine* engine = nullptr;
 
 extern "C" {
-    // 1. Initialize and Load Model
     JNIEXPORT jboolean JNICALL Java_com_mastery_uif_UIFEngine_loadModel(JNIEnv *env, jobject thiz, jstring modelPath) {
         if(engine != nullptr) { delete engine; }
-        engine = new UIF_Pure_Inference_Engine();
-        
         const char *path = env->GetStringUTFChars(modelPath, 0);
-        bool success = engine->loadModel(path);
+        engine = new UIF_UniversalEngine(path);
         env->ReleaseStringUTFChars(modelPath, path);
-        return success ? JNI_TRUE : JNI_FALSE;
+        return JNI_TRUE;
     }
     
-    // 2. Prevent Memory Leak (Absolute Cleansing)
     JNIEXPORT void JNICALL Java_com_mastery_uif_UIFEngine_releaseEngine(JNIEnv *env, jobject thiz) {
-        if (engine != nullptr) { delete engine; engine = nullptr; LOGI("UIF SDK: Engine Released. Zero Memory Leak."); }
+        if (engine != nullptr) { delete engine; engine = nullptr; }
     }
 
-    // 3. Process Frame (Zero-Copy)
     JNIEXPORT jint JNICALL Java_com_mastery_uif_UIFEngine_runInference(JNIEnv *env, jobject thiz, jobject bitmapIn) {
         if(!engine) return -1;
         AndroidBitmapInfo infoIn; void *pixelsIn;
         AndroidBitmap_getInfo(env, bitmapIn, &infoIn);
         AndroidBitmap_lockPixels(env, bitmapIn, &pixelsIn);
         
-        int prediction = engine->runInference((uint32_t*)pixelsIn);
+        int prediction = engine->ExecuteInference((uint8_t*)pixelsIn);
         
         AndroidBitmap_unlockPixels(env, bitmapIn);
         return prediction;
